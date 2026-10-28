@@ -1213,12 +1213,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int dspLabelW = S(48);
             int gap = S(16);
             int avail = rightEdge - fltX - gap - dspLabelW - S(4);
-            int fltW = avail * 55 / 100;
-            if (fltW < S(140)) fltW = S(140);
+            // 平时保持和原版一致的固定宽度，只有窗口不够宽时才等比压缩
+            int fltW = S(340);
+            int dspW = S(340);
+            if (fltW + dspW > avail) {
+                fltW = avail * fltW / (fltW + dspW);
+                dspW = avail - fltW;
+                if (fltW < S(120)) fltW = S(120);
+                if (dspW < S(120)) dspW = S(120);
+            }
             int dspLabelX = fltX + fltW + gap;
             int dspX = dspLabelX + dspLabelW + S(4);
-            int dspW = rightEdge - dspX;
-            if (dspW < S(140)) dspW = S(140);
             if (g.fltLabel) MoveWindow(g.fltLabel, fltLabelX, S(22), S(48), S(30), TRUE);
             if (g.filterEdit) MoveWindow(g.filterEdit, fltX, S(20), fltW, S(32), TRUE);
             if (g.dspLabel) MoveWindow(g.dspLabel, dspLabelX, S(22), dspLabelW, S(30), TRUE);
