@@ -58,6 +58,7 @@ struct PacketRecord {
     unsigned int ts_sec;
     unsigned int ts_usec;
     std::vector<unsigned char> data;
+    std::wstring cols[7];   // 预渲染的 7 列文本（虚拟列表按需取用，避免重复生成）
 };
 
 struct AdapterInfo {
@@ -77,6 +78,8 @@ struct CaptureGlobals {
     HWND adapterCombo;
     HWND filterEdit;
     HWND displayEdit;
+    HWND fltLabel;
+    HWND dspLabel;
     HWND startBtn;
     HWND stopBtn;
     HWND clearBtn;
@@ -87,7 +90,8 @@ struct CaptureGlobals {
     HWND hexEdit;
     HWND statusBar;
     std::vector<AdapterInfo> adapters;
-    std::vector<PacketRecord*> packets;
+    std::vector<PacketRecord*> packets;   // 最近 5000 个包（环形淘汰）
+    std::vector<PacketRecord*> view;      // 当前显示的行，是 packets 的子集，保持时间顺序
     std::vector<DisplayFilterTerm> displayTerms;
     std::map<std::wstring, unsigned long> protoCount;
     std::map<std::wstring, unsigned long long> protoBytes;
@@ -659,58 +663,33 @@ static DWORD WINAPI CaptureThread(LPVOID param) {
 
 static void UpdateStatusBar() {
     wchar_t text[256];
-    swprintf_s(text, 256, L"包: %llu  字节: %llu  TCP: %lu  UDP: %lu  ARP: %lu  ICMP: %lu  IGMP: %lu", g.totalPackets, g.totalBytes, g.protoCount[L"TCP"], g.protoCount[L"UDP"], g.protoCount[L"ARP"], g.protoCount[L"ICMP"], g.protoCount[L"IGMP"]);
+    swprintf_s(text, 256, L"包: %llu   字节: %llu   TCP: %lu   UDP: %lu   TLS: %lu   DNS: %lu   HTTP: %lu   ARP: %lu",
+        g.totalPackets, g.totalBytes,
+        g.protoCount[L"TCP"], g.protoCount[L"UDP"], g.protoCount[L"TLS"],
+        g.protoCount[L"DNS"], g.protoCount[L"HTTP"], g.protoCount[L"ARP"]);
     g.statusText = text;
     SendMessageW(g.statusBar, SB_SETTEXTW, 0, (LPARAM)g.statusText.c_str());
 }
 
-static PacketRecord* RowRecord(int row) {
-    LVITEMW it = {};
-    it.mask = LVIF_PARAM;
-    it.iItem = row;
-    if (!ListView_GetItem(g.packetList, &it)) return NULL;
-    return (PacketRecord*)it.lParam;
-}
-
-// 列表里可能被显示过滤器筛掉了一些包，所以不能按行号删，必须按 lParam 找回对应行
-static void RemoveRowByRecord(PacketRecord* rec) {
-    if (!rec || !MatchDisplayFilter(rec)) return;   // 本来就没显示，无需扫描
-    int count = ListView_GetItemCount(g.packetList);
-    for (int i = 0; i < count; ++i) {
-        if (RowRecord(i) == rec) {
-            ListView_DeleteItem(g.packetList, i);
-            return;
-        }
-    }
-}
-
-static void AppendPacketRow(PacketRecord* rec) {
-    LVITEMW lvi = {};
-    lvi.mask = LVIF_TEXT | LVIF_PARAM;
-    lvi.iItem = ListView_GetItemCount(g.packetList);
+// 生成 7 列显示文本，只在包进入时做一次（虚拟列表按需取用）
+static void BuildColumnText(PacketRecord* rec) {
     wchar_t buf[64];
     swprintf_s(buf, 64, L"%llu", rec->no);
-    lvi.pszText = buf;
-    lvi.lParam = (LPARAM)rec;
-    int idx = ListView_InsertItem(g.packetList, &lvi);
-    std::wstring srcText = SanitizeWide(ToW(rec->src));
-    std::wstring dstText = SanitizeWide(ToW(rec->dst));
-    std::wstring protoText = SanitizeWide(ToW(rec->proto));
-    std::wstring infoText = SanitizeWide(ToW(rec->info));
-    wchar_t time[64];
-    swprintf_s(time, 64, L"%02d:%02d:%02d.%03d", rec->time.wHour, rec->time.wMinute, rec->time.wSecond, rec->time.wMilliseconds);
-    ListView_SetItemText(g.packetList, idx, 1, time);
-    ListView_SetItemText(g.packetList, idx, 2, (LPWSTR)srcText.c_str());
-    ListView_SetItemText(g.packetList, idx, 3, (LPWSTR)dstText.c_str());
-    ListView_SetItemText(g.packetList, idx, 4, (LPWSTR)protoText.c_str());
-    wchar_t len[32]; swprintf_s(len, 32, L"%lu", rec->len);
-    ListView_SetItemText(g.packetList, idx, 5, len);
-    ListView_SetItemText(g.packetList, idx, 6, (LPWSTR)infoText.c_str());
+    rec->cols[0] = buf;
+    swprintf_s(buf, 64, L"%02d:%02d:%02d.%03d", rec->time.wHour, rec->time.wMinute, rec->time.wSecond, rec->time.wMilliseconds);
+    rec->cols[1] = buf;
+    rec->cols[2] = SanitizeWide(ToW(rec->src));
+    rec->cols[3] = SanitizeWide(ToW(rec->dst));
+    rec->cols[4] = SanitizeWide(ToW(rec->proto));
+    swprintf_s(buf, 64, L"%lu", rec->len);
+    rec->cols[5] = buf;
+    rec->cols[6] = SanitizeWide(ToW(rec->info));
 }
 
 static void InsertPacket(PacketRecord* rec) {
     EnterCriticalSection(&g.cs);
     rec->no = ++g.nextNo;
+    BuildColumnText(rec);
     g.packets.push_back(rec);
     PacketRecord* trimmed = NULL;
     if (g.packets.size() > 5000) {
@@ -726,24 +705,45 @@ static void InsertPacket(PacketRecord* rec) {
     g.endpointCount[ep2]++; g.endpointBytes[ep2] += rec->len;
     LeaveCriticalSection(&g.cs);
 
+    // 淘汰最旧的包：view 与 packets 同序，它在 view 里就一定位于头部
+    bool viewChanged = false;
     if (trimmed) {
-        RemoveRowByRecord(trimmed);
+        if (!g.view.empty() && g.view.front() == trimmed) {
+            g.view.erase(g.view.begin());
+            viewChanged = true;
+        }
         delete trimmed;
     }
-    if (MatchDisplayFilter(rec)) AppendPacketRow(rec);
+
+    bool follow = false;
+    if (MatchDisplayFilter(rec)) {
+        int before = (int)g.view.size();
+        int top = ListView_GetTopIndex(g.packetList);
+        int page = ListView_GetCountPerPage(g.packetList);
+        follow = (before == 0 || top + page >= before);   // 用户正在翻历史时不抢滚动
+        g.view.push_back(rec);
+        viewChanged = true;
+    }
+    if (viewChanged) {
+        ListView_SetItemCountEx(g.packetList, (int)g.view.size(), LVSICF_NOINVALIDATEALL);
+        if (follow && !g.view.empty())
+            ListView_EnsureVisible(g.packetList, (int)g.view.size() - 1, FALSE);
+    }
     UpdateStatusBar();
 }
 
 static void RebuildPacketList() {
-    ListView_DeleteAllItems(g.packetList);
     TreeView_DeleteAllItems(g.detailTree);
     SetWindowTextW(g.hexEdit, L"");
     EnterCriticalSection(&g.cs);
     std::vector<PacketRecord*> snapshot = g.packets;
     LeaveCriticalSection(&g.cs);
+    g.view.clear();
+    g.view.reserve(snapshot.size());
     for (PacketRecord* rec : snapshot) {
-        if (MatchDisplayFilter(rec)) AppendPacketRow(rec);
+        if (MatchDisplayFilter(rec)) g.view.push_back(rec);
     }
+    ListView_SetItemCountEx(g.packetList, (int)g.view.size(), 0);
 }
 
 static void ApplyDisplayFilter() {
@@ -756,7 +756,14 @@ static void ApplyDisplayFilter() {
 static void ShowDetails(PacketRecord* rec) {
     TreeView_DeleteAllItems(g.detailTree);
     SetWindowTextW(g.hexEdit, L"");
-    if (!rec) return;
+    if (!rec) {
+        TVINSERTSTRUCTW hint = {};
+        hint.item.mask = TVIF_TEXT;
+        hint.item.pszText = (LPWSTR)L"未选中数据包 —— 点击上方列表中的任意一行查看详情";
+        hint.hInsertAfter = TVI_ROOT;
+        TreeView_InsertItem(g.detailTree, &hint);
+        return;
+    }
     HTREEITEM root = NULL;
     TVINSERTSTRUCTW tv = {};
     tv.item.mask = TVIF_TEXT;
@@ -770,19 +777,28 @@ static void ShowDetails(PacketRecord* rec) {
     AddTreeItem(g.detailTree, root, L"协议: " + SanitizeWide(ToW(rec->proto)));
     AddTreeItem(g.detailTree, root, L"长度: " + std::to_wstring(rec->len) + L" 字节");
     AddTreeItem(g.detailTree, root, L"摘要: " + SanitizeWide(ToW(rec->info)));
-    AddTreeItem(g.detailTree, root, L"十六进制内容:\n" + ToW(HexDump(rec->data)));
+    // 树节点不支持多行文本，完整转储放在下方十六进制框中显示
+    AddTreeItem(g.detailTree, root, L"十六进制内容: " + std::to_wstring(rec->data.size()) + L" 字节（见下方）");
     SetWindowTextW(g.hexEdit, ToW(HexDump(rec->data)).c_str());
 }
 
 static void ClearPackets() {
+    // 先把队列里还没处理完的 WM_PACKET 丢掉，否则清空后它们会再插回列表，
+    // 而且这些消息持有的 PacketRecord 即将被 delete，留着会变成悬空指针
+    MSG stale;
+    while (PeekMessageW(&stale, g.mainWnd, WM_PACKET, WM_PACKET, PM_REMOVE)) {
+        delete (PacketRecord*)stale.lParam;
+    }
     EnterCriticalSection(&g.cs);
     for (auto* p : g.packets) delete p;
     g.packets.clear();
+    g.view.clear();
     g.protoCount.clear(); g.protoBytes.clear(); g.endpointCount.clear(); g.endpointBytes.clear();
     g.nextNo = 0; g.totalPackets = 0; g.totalBytes = 0;
     LeaveCriticalSection(&g.cs);
-    ListView_DeleteAllItems(g.packetList);
-    TreeView_DeleteAllItems(g.detailTree);
+    ListView_SetItemCountEx(g.packetList, 0, LVSICF_NOINVALIDATEALL);
+    InvalidateRect(g.packetList, NULL, TRUE);
+    ShowDetails(nullptr);
     UpdateStatusBar();
 }
 
@@ -829,11 +845,14 @@ static void StartCapture(HWND hwnd) {
 }
 
 static void ApplyFilterNow(HWND hwnd) {
-    bool wasRunning = g.running;
-    if (wasRunning) {
-        StopCapture(hwnd);
-        StartCapture(hwnd);
+    if (!g.running) {
+        // 未抓包时点「应用过滤」给个反馈，避免看起来像按钮坏了
+        g.statusText = L"当前未在抓包 —— 点「开始捕获」时才会应用过滤表达式";
+        SendMessageW(g.statusBar, SB_SETTEXTW, 0, (LPARAM)g.statusText.c_str());
+        return;
     }
+    StopCapture(hwnd);
+    StartCapture(hwnd);
 }
 
 static void SetFilterText(HWND hwnd, const wchar_t* text) {
@@ -1042,8 +1061,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX: {
         HDC hdc = (HDC)wParam;
+        HWND ctl = (HWND)lParam;
+        wchar_t cls[64] = {0};
+        if (ctl) GetClassNameW(ctl, cls, 64);
+        bool isStatic = (ctl && wcscmp(cls, L"Static") == 0);
         SetBkColor(hdc, CARD_BG);
-        SetTextColor(hdc, TEXT_PRIMARY);
+        SetTextColor(hdc, isStatic ? TEXT_SECONDARY : TEXT_PRIMARY);
         static HBRUSH brush = CreateSolidBrush(CARD_BG);
         return (LRESULT)brush;
     }
@@ -1139,15 +1162,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     case WM_NOTIFY: {
         LPNMHDR nh = (LPNMHDR)lParam;
-        if (nh->idFrom == 2001 && nh->code == LVN_ITEMCHANGED) {
+        if (nh->idFrom == 2001 && nh->code == LVN_GETDISPINFO) {
+            // 虚拟列表：只提供当前可见行的内容，不实际存储列表项
+            NMLVDISPINFO* di = (NMLVDISPINFO*)lParam;
+            int row = di->item.iItem;
+            if (row >= 0 && row < (int)g.view.size()) {
+                PacketRecord* rec = g.view[row];
+                int sub = di->item.iSubItem;
+                if ((di->item.mask & LVIF_TEXT) && sub >= 0 && sub < 7)
+                    di->item.pszText = (LPWSTR)rec->cols[sub].c_str();
+                if (di->item.mask & LVIF_PARAM) di->item.lParam = (LPARAM)rec;
+            }
+            return 0;
+        } else if (nh->idFrom == 2001 && nh->code == LVN_ITEMCHANGED) {
             NMLISTVIEW* lv = (NMLISTVIEW*)lParam;
-            if (lv->uNewState & LVIS_SELECTED) ShowDetails(RowRecord(lv->iItem));
+            if (lv->uNewState & LVIS_SELECTED) {
+                int row = lv->iItem;
+                ShowDetails((row >= 0 && row < (int)g.view.size()) ? g.view[row] : NULL);
+            }
         } else if (nh->idFrom == 2001 && nh->code == NM_CUSTOMDRAW) {
             NMLVCUSTOMDRAW* draw = (NMLVCUSTOMDRAW*)lParam;
             if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
             if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
                 draw->clrTextBk = RGB(255,255,255);
                 draw->clrText = RGB(28,28,30);
+                // 选中行交给系统绘制（保持原版观感），这里只处理协议着色
                 PacketRecord* rec = (PacketRecord*)draw->nmcd.lItemlParam;
                 if (rec) {
                     std::wstring proto = ToW(rec->proto);
@@ -1157,6 +1196,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     else if (proto == L"ICMP") draw->clrTextBk = RGB(255,244,245);
                     else if (proto == L"IGMP") draw->clrTextBk = RGB(243,240,255);
                     else if (proto == L"HTTP") draw->clrTextBk = RGB(255,240,246);
+                    else if (proto == L"TLS") draw->clrTextBk = RGB(235,247,247);
                 }
                 return CDRF_DODEFAULT;
             }
@@ -1165,6 +1205,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     case WM_SIZE: {
         int w = LOWORD(lParam), h = HIWORD(lParam);
+        // 顶部两个输入框按窗口宽度自适应，避免非最大化时「显示」框被裁掉
+        {
+            int rightEdge = w - S(28);
+            int fltLabelX = S(352);
+            int fltX = fltLabelX + S(48) + S(4);
+            int dspLabelW = S(48);
+            int gap = S(16);
+            int avail = rightEdge - fltX - gap - dspLabelW - S(4);
+            int fltW = avail * 55 / 100;
+            if (fltW < S(140)) fltW = S(140);
+            int dspLabelX = fltX + fltW + gap;
+            int dspX = dspLabelX + dspLabelW + S(4);
+            int dspW = rightEdge - dspX;
+            if (dspW < S(140)) dspW = S(140);
+            if (g.fltLabel) MoveWindow(g.fltLabel, fltLabelX, S(22), S(48), S(30), TRUE);
+            if (g.filterEdit) MoveWindow(g.filterEdit, fltX, S(20), fltW, S(32), TRUE);
+            if (g.dspLabel) MoveWindow(g.dspLabel, dspLabelX, S(22), dspLabelW, S(30), TRUE);
+            if (g.displayEdit) MoveWindow(g.displayEdit, dspX, S(20), dspW, S(32), TRUE);
+        }
         int statusH = S(30);
         int margin = S(24);
         int top = S(176);
@@ -1199,7 +1258,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     case WM_GETMINMAXINFO: {
         MINMAXINFO* info = (MINMAXINFO*)lParam;
-        info->ptMinTrackSize.x = S(900);
+        info->ptMinTrackSize.x = S(960);
         info->ptMinTrackSize.y = S(620);
         return 0;
     }
@@ -1229,9 +1288,9 @@ static void CreateControls(HWND hwnd) {
     HFONT bold = CreateFontW(-S(19), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
     CreateWindowW(L"STATIC", L"网卡", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, S(28), S(22), S(48), S(30), hwnd, NULL, g.hInst, NULL);
     g.adapterCombo = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, S(78), S(20), S(260), S(300), hwnd, (HMENU)9001, g.hInst, NULL);
-    CreateWindowW(L"STATIC", L"过滤", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, S(352), S(22), S(48), S(30), hwnd, NULL, g.hInst, NULL);
+    g.fltLabel = CreateWindowW(L"STATIC", L"过滤", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, S(352), S(22), S(48), S(30), hwnd, NULL, g.hInst, NULL);
     g.filterEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, S(404), S(20), S(340), S(32), hwnd, (HMENU)9002, g.hInst, NULL);
-    CreateWindowW(L"STATIC", L"显示", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, S(760), S(22), S(48), S(30), hwnd, NULL, g.hInst, NULL);
+    g.dspLabel = CreateWindowW(L"STATIC", L"显示", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, S(760), S(22), S(48), S(30), hwnd, NULL, g.hInst, NULL);
     g.displayEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, S(812), S(20), S(340), S(32), hwnd, (HMENU)9003, g.hInst, NULL);
     SetWindowSubclass(g.displayEdit, DisplayFilterEditProc, 1, 0);
 
@@ -1250,7 +1309,7 @@ static void CreateControls(HWND hwnd) {
     CreateWindowW(L"BUTTON", L"保存PCAP", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, S(388), S(102), S(92), S(32), hwnd, (HMENU)1010, g.hInst, NULL);
     CreateWindowW(L"BUTTON", L"打开PCAP", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, S(486), S(102), S(92), S(32), hwnd, (HMENU)1011, g.hInst, NULL);
     CreateWindowW(L"BUTTON", L"导出统计", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, S(586), S(102), S(92), S(32), hwnd, (HMENU)1013, g.hInst, NULL);
-    g.promiscBtn = CreateWindowW(L"BUTTON", L"混杂模式", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_AUTOCHECKBOX, S(692), S(102), S(100), S(32), hwnd, (HMENU)1012, g.hInst, NULL);
+    g.promiscBtn = CreateWindowW(L"BUTTON", L"混杂模式", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_AUTOCHECKBOX, S(532), S(62), S(100), S(34), hwnd, (HMENU)1012, g.hInst, NULL);
     SendMessageW(g.promiscBtn, BM_SETCHECK, BST_CHECKED, 0);
 
     g.packetList = CreateWindowExW(0, WC_LISTVIEWW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER, S(16), S(74), S(1000), S(300), hwnd, (HMENU)2001, g.hInst, NULL);
@@ -1274,6 +1333,9 @@ static void CreateControls(HWND hwnd) {
     SendMessageW(g.adapterCombo, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(g.filterEdit, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(g.displayEdit, WM_SETFONT, (WPARAM)font, TRUE);
+    // 占位提示（EM_SETCUEBANNER），输入后自动消失
+    SendMessageW(g.filterEdit, 0x1501, TRUE, (LPARAM)L"如 tcp port 443，留空抓全部");
+    SendMessageW(g.displayEdit, 0x1501, TRUE, (LPARAM)L"如 ip.src==192.168.0.1 或 baidu，回车生效");
     SendMessageW(g.packetList, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(g.detailTree, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(g.hexEdit, WM_SETFONT, (WPARAM)font, TRUE);
@@ -1382,6 +1444,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
     UpdateDpiForWindow(hwnd);
     EnableWindowBackdrop(hwnd);
     CreateControls(hwnd);
+    ShowDetails(nullptr);   // 详情区空状态提示
     g.statusText = L"就绪";
     SendMessageW(g.statusBar, SB_SETTEXTW, 0, (LPARAM)g.statusText.c_str());
     if (!LoadWinPcapAPI()) {
