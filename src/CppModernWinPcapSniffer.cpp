@@ -1050,6 +1050,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         HDC hdc = BeginPaint(hwnd, &paint);
         RECT client;
         GetClientRect(hwnd, &client);
+        HBRUSH bgBrush = CreateSolidBrush(APP_BG);   // 先铺满背景，避免最大化时露出黑底
+        FillRect(hdc, &client, bgBrush);
+        DeleteObject(bgBrush);
         RECT topCard = {S(16), S(16), client.right - S(16), S(160)};
         RECT contentCard = {S(16), S(176), client.right - S(16), client.bottom - S(40)};
         DrawRoundedCard(hdc, topCard, CARD_BG, BORDER_RGB, S(18));
@@ -1377,51 +1380,20 @@ static void UpdateDpiForWindow(HWND hwnd) {
 }
 
 static void EnableWindowBackdrop(HWND hwnd) {
+    // 只保留窗口圆角。不再启用 Mica / 亚克力背景：
+    // 最大化时 DWM 的背景区域有时只绘制一部分（上/右留下黑底），
+    // 且遮住自绘卡片。改用纯色背景（WM_ERASEBKGND 里填充 APP_BG）最稳。
     HMODULE dwm = GetModuleHandleW(L"dwmapi.dll");
     if (!dwm) dwm = LoadLibraryW(L"dwmapi.dll");
     if (dwm) {
         typedef HRESULT (WINAPI *DwmSetWindowAttributeFn)(HWND, DWORD, LPCVOID, DWORD);
         DwmSetWindowAttributeFn dwmSet = (DwmSetWindowAttributeFn)GetProcAddress(dwm, "DwmSetWindowAttribute");
         if (dwmSet) {
-            DWORD corner = 2;
+            DWORD corner = 2;   // DWMWA_WINDOW_CORNER_PREFERENCE = ROUND
             dwmSet(hwnd, 33, &corner, sizeof(corner));
-            DWORD backdrop = 2;
-            if (SUCCEEDED(dwmSet(hwnd, 38, &backdrop, sizeof(backdrop)))) {
-                g.materialEnabled = true;
-            }
-            if (g.materialEnabled) {
-                BOOL mica = TRUE;
-                if (!SUCCEEDED(dwmSet(hwnd, 1029, &mica, sizeof(mica)))) {
-                    DWORD transparent = 2;
-                    dwmSet(hwnd, 38, &transparent, sizeof(transparent));
-                }
-            }
         }
     }
-    if (!g.materialEnabled) {
-        struct AccentPolicy {
-            int AccentState;
-            int AccentFlags;
-            DWORD GradientColor;
-            int AnimationId;
-        };
-        struct WindowCompositionAttributeData {
-            int Attrib;
-            void* pvData;
-            SIZE_T cbData;
-        };
-        typedef BOOL (WINAPI *SetWindowCompositionAttributeFn)(HWND, WindowCompositionAttributeData*);
-        HMODULE user32 = GetModuleHandleW(L"user32.dll");
-        SetWindowCompositionAttributeFn setComp = (SetWindowCompositionAttributeFn)GetProcAddress(user32, "SetWindowCompositionAttribute");
-        if (setComp) {
-            AccentPolicy policy = {0};
-            policy.AccentState = 4;
-            policy.AccentFlags = 2;
-            policy.GradientColor = 0xB3FFFFFF;
-            WindowCompositionAttributeData data = {19, &policy, sizeof(policy)};
-            if (setComp(hwnd, &data)) g.materialEnabled = true;
-        }
-    }
+    g.materialEnabled = false;
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
