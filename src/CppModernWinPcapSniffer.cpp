@@ -65,11 +65,18 @@ struct AdapterInfo {
     std::wstring desc;
 };
 
+// 显示过滤器词条：裸关键字在 src/dst/proto/info 里搜，xxx==yyy 按字段精确匹配
+struct DisplayFilterTerm {
+    enum Kind { KEYWORD, SRC, DST, ADDR, PROTO } kind;
+    std::string value;
+};
+
 struct CaptureGlobals {
     HINSTANCE hInst;
     HWND mainWnd;
     HWND adapterCombo;
     HWND filterEdit;
+    HWND displayEdit;
     HWND startBtn;
     HWND stopBtn;
     HWND clearBtn;
@@ -81,6 +88,7 @@ struct CaptureGlobals {
     HWND statusBar;
     std::vector<AdapterInfo> adapters;
     std::vector<PacketRecord*> packets;
+    std::vector<DisplayFilterTerm> displayTerms;
     std::map<std::wstring, unsigned long> protoCount;
     std::map<std::wstring, unsigned long long> protoBytes;
     std::map<std::wstring, unsigned long> endpointCount;
@@ -209,6 +217,60 @@ static std::string ToA(const std::wstring& s) {
     return a;
 }
 
+static std::string LowerAscii(const std::string& s) {
+    std::string r = s;
+    for (char& c : r) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    return r;
+}
+
+// 语法：ip.src== / src== / ip.dst== / dst== / ip.addr== / addr== / proto== / 裸关键字
+// 多个词条之间是 AND 关系；空串表示不过滤
+static std::vector<DisplayFilterTerm> ParseDisplayFilter(const wchar_t* text) {
+    std::vector<DisplayFilterTerm> terms;
+    std::istringstream is(ToA(text));
+    std::string tok;
+    while (is >> tok) {
+        DisplayFilterTerm t;
+        size_t eq = tok.find("==");
+        if (eq == std::string::npos) {
+            t.kind = DisplayFilterTerm::KEYWORD;
+            t.value = LowerAscii(tok);
+        } else {
+            std::string key = LowerAscii(tok.substr(0, eq));
+            t.value = LowerAscii(tok.substr(eq + 2));
+            if (key == "ip.src" || key == "src") t.kind = DisplayFilterTerm::SRC;
+            else if (key == "ip.dst" || key == "dst") t.kind = DisplayFilterTerm::DST;
+            else if (key == "ip.addr" || key == "addr" || key == "ip") t.kind = DisplayFilterTerm::ADDR;
+            else if (key == "proto" || key == "protocol") t.kind = DisplayFilterTerm::PROTO;
+            else { t.kind = DisplayFilterTerm::KEYWORD; t.value = LowerAscii(tok); }
+        }
+        terms.push_back(t);
+    }
+    return terms;
+}
+
+static bool MatchDisplayFilter(const PacketRecord* rec) {
+    if (g.displayTerms.empty()) return true;
+    const std::string src = LowerAscii(rec->src);
+    const std::string dst = LowerAscii(rec->dst);
+    const std::string proto = LowerAscii(rec->proto);
+    const std::string info = LowerAscii(rec->info);
+    for (const DisplayFilterTerm& t : g.displayTerms) {
+        bool hit = false;
+        switch (t.kind) {
+        case DisplayFilterTerm::SRC: hit = src.find(t.value) != std::string::npos; break;
+        case DisplayFilterTerm::DST: hit = dst.find(t.value) != std::string::npos; break;
+        case DisplayFilterTerm::ADDR: hit = src.find(t.value) != std::string::npos ||
+                                            dst.find(t.value) != std::string::npos; break;
+        case DisplayFilterTerm::PROTO: hit = proto.find(t.value) != std::string::npos; break;
+        default: hit = src.find(t.value) != std::string::npos || dst.find(t.value) != std::string::npos ||
+                       proto.find(t.value) != std::string::npos || info.find(t.value) != std::string::npos; break;
+        }
+        if (!hit) return false;
+    }
+    return true;
+}
+
 static std::string IPToString(const unsigned char* b) {
     std::ostringstream os;
     os << (int)b[0] << '.' << (int)b[1] << '.' << (int)b[2] << '.' << (int)b[3];
@@ -304,6 +366,114 @@ static std::string ParseHttpInfo(const unsigned char* payload, size_t len, unsig
     return info.str();
 }
 
+static std::string TlsVersionName(unsigned short v) {
+    switch (v) {
+    case 0x0300: return "SSL3.0";
+    case 0x0301: return "TLS1.0";
+    case 0x0302: return "TLS1.1";
+    case 0x0303: return "TLS1.2";
+    case 0x0304: return "TLS1.3";
+    default: return std::string();
+    }
+}
+
+// p 指向 ClientHello 握手体（记录头 5 字节之后），所有读取都做边界检查。
+// 版本优先取 supported_versions 扩展里的最高值，否则退回 legacy_version
+// （record 头的 0x0301 只是兼容占位，直接显示会误报成 TLS1.0）
+static bool ParseClientHello(const unsigned char* p, size_t len, std::string& sni, unsigned short& version) {
+    sni.clear();
+    version = 0;
+    size_t pos = 4;                        // handshake type(1) + length(3)
+    if (pos + 2 + 32 > len) return false;
+    version = (p[pos] << 8) | p[pos + 1];  // legacy_version
+    pos += 2;
+    pos += 32;                             // random
+    size_t sidLen = p[pos++];
+    if (pos + sidLen + 2 > len) return false;
+    pos += sidLen;
+    size_t csLen = (p[pos] << 8) | p[pos + 1];
+    pos += 2;
+    if (pos + csLen + 1 > len) return false;
+    pos += csLen;
+    size_t compLen = p[pos++];
+    if (pos + compLen + 2 > len) return false;
+    pos += compLen;
+    size_t extTotal = (p[pos] << 8) | p[pos + 1];
+    pos += 2;
+    if (pos + extTotal > len) extTotal = len - pos;   // 包被截断时容忍
+    size_t extEnd = pos + extTotal;
+    while (pos + 4 <= extEnd) {
+        unsigned short type = (p[pos] << 8) | p[pos + 1];
+        size_t elen = (p[pos + 2] << 8) | p[pos + 3];
+        pos += 4;
+        if (pos + elen > extEnd) return false;
+        if (type == 0 && elen >= 5) {                 // server_name 扩展
+            size_t lp = pos;
+            size_t listEnd = lp + 2 + ((p[lp] << 8) | p[lp + 1]);
+            lp += 2;
+            if (listEnd > pos + elen) listEnd = pos + elen;
+            while (lp + 3 <= listEnd) {
+                unsigned char nameType = p[lp];
+                size_t nameLen = (p[lp + 1] << 8) | p[lp + 2];
+                lp += 3;
+                if (lp + nameLen > listEnd) break;
+                if (nameType == 0 && nameLen > 0) {
+                    sni.assign(reinterpret_cast<const char*>(p + lp), nameLen);
+                    break;
+                }
+                lp += nameLen;
+            }
+        } else if (type == 43 && elen >= 3) {         // supported_versions
+            size_t n = p[pos];                        // 列表字节数
+            if (n + 1 <= elen) {
+                for (size_t i = 0; i + 2 <= n; i += 2) {
+                    unsigned short v = (p[pos + 1 + i] << 8) | p[pos + 2 + i];
+                    if (v > version) version = v;
+                }
+            }
+        }
+        pos += elen;
+    }
+    return !sni.empty();
+}
+
+// 返回 "ClientHello SNI=www.baidu.com TLS1.2" 这类摘要；SNI 来自明文扩展，无需解密
+static std::string DescribeTls(const unsigned char* payload, size_t len) {
+    unsigned char content = payload[0];
+    unsigned short recVer = (payload[1] << 8) | payload[2];
+    size_t recLen = len >= 5 ? ((size_t)payload[3] << 8 | payload[4]) : 0;
+    std::ostringstream os;
+    if (content == 22 && len >= 6) {
+        unsigned char hs = payload[5];
+        const char* hsName = hs == 1 ? "ClientHello" : hs == 2 ? "ServerHello" :
+                             hs == 4 ? "NewSessionTicket" : hs == 11 ? "Certificate" :
+                             hs == 12 ? "ServerKeyExchange" : hs == 13 ? "CertificateRequest" :
+                             hs == 14 ? "ServerHelloDone" : hs == 16 ? "ClientKeyExchange" :
+                             hs == 20 ? "Finished" : "Handshake";
+        os << hsName;
+        unsigned short ver = recVer;
+        if (hs == 1) {
+            std::string sni;
+            unsigned short chVer = 0;
+            ParseClientHello(payload + 5, len - 5, sni, chVer);
+            if (!sni.empty()) os << " SNI=" << sni;
+            if (chVer) ver = chVer;
+        }
+        std::string v = TlsVersionName(ver);
+        if (!v.empty()) os << ' ' << v;
+        return os.str();
+    }
+    switch (content) {
+    case 20: os << "ChangeCipherSpec"; break;
+    case 21: os << "Alert"; break;
+    case 23: os << "Application Data " << recLen << "B"; break;
+    default: os << "Record"; break;
+    }
+    std::string v = TlsVersionName(recVer);
+    if (!v.empty()) os << ' ' << v;
+    return os.str();
+}
+
 static std::string ParseDnsName(const unsigned char* data, size_t size, size_t& offset) {
     std::ostringstream name;
     unsigned char hops = 0;
@@ -384,12 +554,16 @@ static void PacketHandler(unsigned char* user, const struct pcap_pkthdr* hdr, co
                                 (payload[0] == 'G' || payload[0] == 'P' || payload[0] == 'H' ||
                                  payload[0] == 'D' || payload[0] == 'C' || payload[0] == 'O' ||
                                  (payloadLen >= 5 && strncmp(reinterpret_cast<const char*>(payload), "HTTP/", 5) == 0));
+                    bool tlsRecord = payloadLen >= 5 && payload[0] >= 20 && payload[0] <= 23 &&
+                                     payload[1] == 0x03 && payload[2] <= 0x04;
+                    bool tlsPort = (sport == 443 || dport == 443 || sport == 8443 || dport == 8443);
                     if (http) {
                         rec->proto = "HTTP";
                         os << " | " << ParseHttpInfo(payload, payloadLen, sport, dport);
-                    } else if ((sport == 443 || dport == 443 || sport == 8443 || dport == 8443) && payloadLen >= 3 && payload[0] == 0x16) {
+                    } else if (tlsRecord && (tlsPort || payload[0] == 22)) {
+                        // 非 443 端口只认 ClientHello，避免把随机二进制误判成 TLS
                         rec->proto = "TLS";
-                        os << " | TLS Record";
+                        os << " | " << DescribeTls(payload, payloadLen);
                     } else if (sport == 53 || dport == 53) {
                         rec->proto = "DNS";
                         size_t offset = 12;
@@ -490,26 +664,27 @@ static void UpdateStatusBar() {
     SendMessageW(g.statusBar, SB_SETTEXTW, 0, (LPARAM)g.statusText.c_str());
 }
 
-static void InsertPacket(PacketRecord* rec) {
-    EnterCriticalSection(&g.cs);
-    rec->no = ++g.nextNo;
-    g.packets.push_back(rec);
-    if (g.packets.size() > 5000) {
-        PacketRecord* old = g.packets.front();
-        g.packets.erase(g.packets.begin());
-        delete old;
-        ListView_DeleteItem(g.packetList, 0);
-    }
-    g.totalPackets++;
-    g.totalBytes += rec->len;
-    std::wstring proto = ToW(rec->proto);
-    g.protoCount[ToW(rec->proto)]++;
-    g.protoBytes[ToW(rec->proto)] += rec->len;
-    std::wstring ep1 = ToW(rec->src), ep2 = ToW(rec->dst);
-    g.endpointCount[ep1]++; g.endpointBytes[ep1] += rec->len;
-    g.endpointCount[ep2]++; g.endpointBytes[ep2] += rec->len;
-    LeaveCriticalSection(&g.cs);
+static PacketRecord* RowRecord(int row) {
+    LVITEMW it = {};
+    it.mask = LVIF_PARAM;
+    it.iItem = row;
+    if (!ListView_GetItem(g.packetList, &it)) return NULL;
+    return (PacketRecord*)it.lParam;
+}
 
+// 列表里可能被显示过滤器筛掉了一些包，所以不能按行号删，必须按 lParam 找回对应行
+static void RemoveRowByRecord(PacketRecord* rec) {
+    if (!rec || !MatchDisplayFilter(rec)) return;   // 本来就没显示，无需扫描
+    int count = ListView_GetItemCount(g.packetList);
+    for (int i = 0; i < count; ++i) {
+        if (RowRecord(i) == rec) {
+            ListView_DeleteItem(g.packetList, i);
+            return;
+        }
+    }
+}
+
+static void AppendPacketRow(PacketRecord* rec) {
     LVITEMW lvi = {};
     lvi.mask = LVIF_TEXT | LVIF_PARAM;
     lvi.iItem = ListView_GetItemCount(g.packetList);
@@ -531,14 +706,57 @@ static void InsertPacket(PacketRecord* rec) {
     wchar_t len[32]; swprintf_s(len, 32, L"%lu", rec->len);
     ListView_SetItemText(g.packetList, idx, 5, len);
     ListView_SetItemText(g.packetList, idx, 6, (LPWSTR)infoText.c_str());
+}
+
+static void InsertPacket(PacketRecord* rec) {
+    EnterCriticalSection(&g.cs);
+    rec->no = ++g.nextNo;
+    g.packets.push_back(rec);
+    PacketRecord* trimmed = NULL;
+    if (g.packets.size() > 5000) {
+        trimmed = g.packets.front();
+        g.packets.erase(g.packets.begin());
+    }
+    g.totalPackets++;
+    g.totalBytes += rec->len;
+    g.protoCount[ToW(rec->proto)]++;
+    g.protoBytes[ToW(rec->proto)] += rec->len;
+    std::wstring ep1 = ToW(rec->src), ep2 = ToW(rec->dst);
+    g.endpointCount[ep1]++; g.endpointBytes[ep1] += rec->len;
+    g.endpointCount[ep2]++; g.endpointBytes[ep2] += rec->len;
+    LeaveCriticalSection(&g.cs);
+
+    if (trimmed) {
+        RemoveRowByRecord(trimmed);
+        delete trimmed;
+    }
+    if (MatchDisplayFilter(rec)) AppendPacketRow(rec);
     UpdateStatusBar();
 }
 
-static void ShowDetails(int idx) {
+static void RebuildPacketList() {
+    ListView_DeleteAllItems(g.packetList);
     TreeView_DeleteAllItems(g.detailTree);
     SetWindowTextW(g.hexEdit, L"");
-    if (idx < 0 || idx >= (int)g.packets.size()) return;
-    PacketRecord* rec = g.packets[idx];
+    EnterCriticalSection(&g.cs);
+    std::vector<PacketRecord*> snapshot = g.packets;
+    LeaveCriticalSection(&g.cs);
+    for (PacketRecord* rec : snapshot) {
+        if (MatchDisplayFilter(rec)) AppendPacketRow(rec);
+    }
+}
+
+static void ApplyDisplayFilter() {
+    wchar_t buf[512] = {0};
+    if (g.displayEdit) GetWindowTextW(g.displayEdit, buf, 512);
+    g.displayTerms = ParseDisplayFilter(buf);
+    RebuildPacketList();
+}
+
+static void ShowDetails(PacketRecord* rec) {
+    TreeView_DeleteAllItems(g.detailTree);
+    SetWindowTextW(g.hexEdit, L"");
+    if (!rec) return;
     HTREEITEM root = NULL;
     TVINSERTSTRUCTW tv = {};
     tv.item.mask = TVIF_TEXT;
@@ -923,7 +1141,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         LPNMHDR nh = (LPNMHDR)lParam;
         if (nh->idFrom == 2001 && nh->code == LVN_ITEMCHANGED) {
             NMLISTVIEW* lv = (NMLISTVIEW*)lParam;
-            if (lv->uNewState & LVIS_SELECTED) ShowDetails(lv->iItem);
+            if (lv->uNewState & LVIS_SELECTED) ShowDetails(RowRecord(lv->iItem));
         } else if (nh->idFrom == 2001 && nh->code == NM_CUSTOMDRAW) {
             NMLVCUSTOMDRAW* draw = (NMLVCUSTOMDRAW*)lParam;
             if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
@@ -995,6 +1213,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+// 显示过滤输入框：回车应用，ESC 清空
+static LRESULT CALLBACK DisplayFilterEditProc(HWND h, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_KEYDOWN) {
+        if (wParam == VK_RETURN) { ApplyDisplayFilter(); return 0; }
+        if (wParam == VK_ESCAPE) { SetWindowTextW(h, L""); ApplyDisplayFilter(); return 0; }
+    } else if (msg == WM_CHAR && (wParam == L'\r' || wParam == L'\n' || wParam == 0x1B)) {
+        return 0;
+    }
+    return DefSubclassProc(h, msg, wParam, lParam);
+}
+
 static void CreateControls(HWND hwnd) {
     HFONT font = CreateFontW(-S(17), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
     HFONT bold = CreateFontW(-S(19), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
@@ -1002,6 +1231,9 @@ static void CreateControls(HWND hwnd) {
     g.adapterCombo = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, S(78), S(20), S(260), S(300), hwnd, (HMENU)9001, g.hInst, NULL);
     CreateWindowW(L"STATIC", L"过滤", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, S(352), S(22), S(48), S(30), hwnd, NULL, g.hInst, NULL);
     g.filterEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, S(404), S(20), S(340), S(32), hwnd, (HMENU)9002, g.hInst, NULL);
+    CreateWindowW(L"STATIC", L"显示", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, S(760), S(22), S(48), S(30), hwnd, NULL, g.hInst, NULL);
+    g.displayEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, S(812), S(20), S(340), S(32), hwnd, (HMENU)9003, g.hInst, NULL);
+    SetWindowSubclass(g.displayEdit, DisplayFilterEditProc, 1, 0);
 
     g.startBtn = CreateWindowW(L"BUTTON", L"开始捕获", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, S(28), S(62), S(108), S(34), hwnd, (HMENU)1001, g.hInst, NULL);
     g.stopBtn = CreateWindowW(L"BUTTON", L"停止捕获", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED, S(142), S(62), S(108), S(34), hwnd, (HMENU)1002, g.hInst, NULL);
@@ -1041,6 +1273,7 @@ static void CreateControls(HWND hwnd) {
     SendMessageW(g.statusBar, SB_SETPARTS, 1, (LPARAM)statusParts);
     SendMessageW(g.adapterCombo, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(g.filterEdit, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageW(g.displayEdit, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(g.packetList, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(g.detailTree, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(g.hexEdit, WM_SETFONT, (WPARAM)font, TRUE);

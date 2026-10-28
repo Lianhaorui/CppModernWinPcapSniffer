@@ -1,0 +1,14 @@
+# 构建输出
+build-msvc/
+
+# MSVC 中间文件
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# 编辑器
+.vs/
+.vscode/
+*.user
