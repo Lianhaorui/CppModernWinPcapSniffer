@@ -1312,7 +1312,7 @@ static void CreateControls(HWND hwnd) {
     g.promiscBtn = CreateWindowW(L"BUTTON", L"混杂模式", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_AUTOCHECKBOX, S(532), S(62), S(100), S(34), hwnd, (HMENU)1012, g.hInst, NULL);
     SendMessageW(g.promiscBtn, BM_SETCHECK, BST_CHECKED, 0);
 
-    g.packetList = CreateWindowExW(0, WC_LISTVIEWW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER, S(16), S(74), S(1000), S(300), hwnd, (HMENU)2001, g.hInst, NULL);
+    g.packetList = CreateWindowExW(0, WC_LISTVIEWW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | WS_BORDER, S(16), S(74), S(1000), S(300), hwnd, (HMENU)2001, g.hInst, NULL);
     SetWindowTheme(g.packetList, L"Explorer", NULL);
     ListView_SetExtendedListViewStyle(g.packetList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
     LVCOLUMNW col = {};
