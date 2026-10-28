@@ -1,297 +1,261 @@
-# 网络嗅探器 by LianHaoruiSec mhszed
+<div align="center">
 
-一个面向 Windows 的现代化网络嗅探器，使用 C++17 和 Win32 API 开发，基于 Npcap/WinPcap 捕获数据包。界面采用 iOS/macOS 风格的卡片布局、圆角和 Mica/毛玻璃效果，支持高 DPI 显示。
+# CppModernWinPcapSniffer
 
-项目用于学习和演示 WinPcap 嗅探器的完整开发过程，包括网卡枚举、BPF 过滤、多线程捕获、协议解析和可视化显示。
+**一个使用 C++17 与 Win32 API 编写的现代化 Windows 网络嗅探器**
 
-![程序界面](docs/screenshot.jpg)
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)](#环境要求)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](#构建)
+[![Win32 API](https://img.shields.io/badge/Win32-API-4B5563)](#技术实现)
+[![Npcap](https://img.shields.io/badge/Npcap-1.x-2F81F7)](https://npcap.com/)
+[![License](https://img.shields.io/badge/License-MIT-2EA043)](LICENSE)
 
-## 功能
+基于 Npcap/WinPcap 的实时抓包、BPF 过滤、协议解析与 PCAP 分析工具。
 
-### 抓包
+</div>
 
-- 枚举本机全部网卡（含 VMware、TAP 等虚拟网卡），下拉框显示网卡描述
-- 启动时自动优先选择 MediaTek Wi-Fi 网卡，找不到则退回任意 Wi-Fi 网卡
-- 混杂模式捕获（可开关，默认开启），支持开始 / 停止 / 清空
-- 抓包线程与界面线程分离，抓包时界面保持响应
-- 列表最多保留最近 5000 个数据包，超出后自动淘汰最旧的包
+## 界面预览
 
-### 两套过滤
+![CppModernWinPcapSniffer 运行界面](docs/images/screenshot.png)
 
-| 类型 | 位置 | 作用 | 生效时机 |
-| --- | --- | --- | --- |
-| 抓包过滤（BPF） | 顶部「过滤」 | 决定**抓什么**，不匹配的包不会进入程序 | 点「开始捕获」/「应用过滤」 |
-| 显示过滤 | 顶部「显示」 | 决定**看什么**，包已经抓到，只是筛掉不显示 | 按**回车**立即生效 |
+界面集成了网卡选择、BPF 抓包过滤、显示过滤、协议快捷筛选、数据包列表、协议详情和十六进制查看。上图展示了程序捕获 TCP/HTTP 流量并查看指定数据包内容的典型运行状态。
 
-### 协议解析
+## 项目简介
 
-- **链路层**：Ethernet、ARP（操作码、发送方/目标 MAC 与 IP）
-- **网络层**：IPv4（TTL、协议号、源/目的 IP）、ICMP、IGMP
-- **传输层**：TCP（端口、序号、确认号、标志位、载荷长度）、UDP
-- **应用层**：HTTP、DNS、TLS、DHCP
+CppModernWinPcapSniffer 是一个面向 Windows 10/11 的学习型网络分析工具。项目使用原生 Win32 API 构建界面，不依赖 MFC 或第三方 UI 框架，并通过运行时动态加载 `wpcap.dll` 接入 Npcap，因此编译时无需安装 Npcap SDK。
 
-### TLS 增强
+它适合用于：
 
-- 从 **ClientHello** 中提取 **SNI 服务器名**（如 `www.baidu.com`）——SNI 是明文传输，**无需安装证书或解密**即可看到访问的域名
-- 从 `supported_versions` 扩展解析**真实 TLS 版本**（TLS1.2 / TLS1.3），而不是记录头里的兼容占位值
-- 识别握手类型：ClientHello、ServerHello、Certificate、Finished 等
-- 识别 ChangeCipherSpec、Alert、Application Data（附带密文长度）
-- 非标准端口上的 ClientHello 同样可以识别，不再只认 443/8443
+- 学习 WinPcap/Npcap 网卡枚举、BPF 过滤和多线程抓包
+- 观察 TCP、UDP、DNS、HTTP、TLS 等协议的报文结构
+- 查看 TLS ClientHello 中明文传输的 SNI 域名
+- 将捕获结果保存为标准 PCAP 文件，继续使用 Wireshark 分析
+- 学习 Win32 自定义绘制、高 DPI 和虚拟列表的实现方式
 
-### 视图与交互
+## 核心特性
 
-- 三栏视图：数据包列表（序号/时间/源地址/目的地址/协议/长度/信息）、树形详情、十六进制内容
-- 点击列表任意一行，下方树形详情和十六进制框自动填充该包的完整内容
-- 按协议着色（TCP 淡蓝、UDP 淡绿、ARP 淡黄、ICMP 淡红、IGMP 淡紫、HTTP 淡粉）
-- 协议快捷按钮：TCP / UDP / HTTP / ARP / DNS / TLS，一键填充对应 BPF 表达式
-- 协议统计窗口：按协议和端点（IP）汇总包数与字节数
-
-### 文件操作
-
-- 保存为 PCAP 文件 / 从 PCAP 文件打开
-- 导出统计结果到 CSV
-
-### 界面
-
-- Per-Monitor DPI Awareness，适配高分屏多显示器
-- Mica / 亚克力背景效果，低版本 Windows 自动回退
-- iOS/macOS 风格卡片布局、圆角、自定义发光按钮
-- 自定义应用图标和版本信息
+| 功能 | 说明 |
+| --- | --- |
+| 实时抓包 | 枚举本机全部网卡，支持开始、停止、清空和混杂模式切换 |
+| 双重过滤 | 独立的 Npcap BPF 抓包过滤与内存显示过滤 |
+| 协议解析 | Ethernet、ARP、IPv4、ICMP、IGMP、TCP、UDP、HTTP、DNS、TLS、DHCP |
+| TLS SNI | 从 ClientHello 中提取 SNI 域名，并识别真实 TLS 版本与握手类型 |
+| 三栏详情 | 数据包列表、协议摘要树、完整十六进制内容联动查看 |
+| 大列表性能 | 所有者绘制虚拟列表，界面只保留最近 5000 个数据包 |
+| 文件互操作 | 保存/打开经典 PCAP，导出协议及端点统计为 CSV |
+| 现代界面 | iOS/macOS 风格卡片、协议着色、Mica/亚克力回退和高 DPI 支持 |
 
 ## 环境要求
 
 | 项目 | 要求 |
 | --- | --- |
-| 操作系统 | Windows 10/11 |
-| 抓包运行库 | Npcap 1.x，安装时勾选 WinPcap API 兼容模式 |
-| 编译器 | MinGW-w64 g++ 或 Visual Studio 2019+ |
-| 构建工具 | CMake 3.16+（可选） |
+| 操作系统 | Windows 10/11 64 位 |
+| 抓包运行库 | [Npcap 1.x](https://npcap.com/)，安装时选择 WinPcap API 兼容模式 |
+| MinGW 工具链 | MinGW-w64 `g++`、`windres` |
+| MSVC 工具链 | Visual Studio 2019/2022（安装“使用 C++ 的桌面开发”） |
+| CMake | CMake 3.16+（使用 CMake 构建时需要） |
 
-Npcap 下载地址：<https://npcap.com/>
+> 抓包和网卡枚举通常需要管理员权限。程序通过 `LoadLibraryW` 动态加载 `wpcap.dll`，优先从 `C:\Windows\System32\Npcap` 查找。
 
-程序运行时会动态加载 `wpcap.dll`，优先查找 `C:\Windows\System32\Npcap`，因此不需要在编译时链接 Npcap SDK。
+## 快速开始
 
-## 构建
+### 1. 安装 Npcap
 
-### 方式一：MinGW-w64 脚本
+安装 Npcap 时请勾选 **Install Npcap in WinPcap API-compatible Mode**。如果 Windows 11 版本较新，建议使用 Npcap 官方提供的最新版本。
 
-确保 `g++`、`windres` 已加入 `PATH`，在仓库根目录执行：
+### 2. 克隆项目
+
+```powershell
+git clone <your-repository-url>
+cd CppModernWinPcapSniffer
+```
+
+### 3. 构建
+
+#### MinGW-w64
+
+确认 `g++` 和 `windres` 已加入 `PATH`，然后在项目根目录运行：
 
 ```bat
 scripts\build.bat
 ```
 
-生成文件：`build\CppModernWinPcapSniffer.exe`
+生成文件：
 
-### 方式二：CMake
-
-需要先安装 CMake 3.16+ 和 Ninja：
-
-```bat
-cmake -S . -B build -G Ninja
-cmake --build build
+```text
+build\CppModernWinPcapSniffer.exe
 ```
 
-如果仓库路径包含空格或中文，建议使用 Ninja；`MinGW Makefiles` 生成器对包含空格的路径支持较差。
+#### Visual Studio 2022 + Ninja
 
-使用 Visual Studio 时：
-
-```bat
-cmake -S . -B build -G "Visual Studio 17 2022"
-cmake --build build --config Release
-```
-
-### 方式三：VS2022 一键脚本（推荐 Windows 用户）
+在项目根目录运行：
 
 ```bat
 build-msvc.bat
 ```
 
-脚本会自动调用 VS2022 自带的 CMake 与 Ninja，产物在 `build-msvc\CppModernWinPcapSniffer.exe`。
+生成文件：
 
-> **MSVC 必读**：源码是不带 BOM 的 UTF-8，MSVC 默认按系统代码页（GBK）解析，会出现大量
-> `C2001 常量中有换行符`、`C2146 语法错误` 之类的假报错。必须加 `/utf-8` 编译选项
-> （`build-msvc.bat` 里已加，手动构建时容易被忽略）。
+```text
+build-msvc\CppModernWinPcapSniffer.exe
+```
 
-## 使用
+`build-msvc.bat` 默认从 `D:\Program Files\Microsoft Visual Studio\2022\Community` 加载工具链。如果 Visual Studio 安装在其他位置，请修改脚本开头的 `VS` 路径。
 
-### 基本流程
+> 源码使用无 BOM 的 UTF-8 编码，MSVC 构建必须启用 `/utf-8`，否则可能出现中文常量换行或语法错误。现有脚本已包含该选项。
 
-1. 启动程序，在「网卡」下拉框中选择要监听的网卡（启动时已自动选中 Wi-Fi 网卡）
-2. （可选）在「过滤」输入框填写 BPF 表达式，留空表示捕获全部流量
-3. 点击「开始捕获」，程序进入混杂模式并开始接收数据包
-4. （可选）在「显示」输入框填写筛选条件，**按回车**生效
-5. 点击数据包列表中的任意一行，下方树形详情与十六进制框显示该包的完整内容
-6. 点击「统计」查看协议分布，或用「保存PCAP」「导出统计」保存结果
+#### CMake
 
-> 列表**点击与否**决定了详情区是否有内容 —— 不选中任何行时，详情树和十六进制框是空的。
+MinGW + Ninja：
 
-### 两个过滤框的区别
+```powershell
+cmake -S . -B build -G Ninja
+cmake --build build
+```
 
-| | 左「过滤」（BPF） | 右「显示」 |
+Visual Studio 生成器：
+
+```powershell
+cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64
+cmake --build build-msvc --config Release
+```
+
+如果项目路径包含空格，建议使用 Ninja，避免部分 Makefile 生成器对路径处理不佳。
+
+### 4. 运行
+
+双击生成的 EXE，或从终端运行：
+
+```powershell
+.\build\CppModernWinPcapSniffer.exe
+```
+
+## 使用流程
+
+1. 在顶部“网卡”下拉框中选择实际承载流量的 Wi-Fi 或有线网卡。
+2. 在“过滤”输入框填写 BPF 表达式，留空表示捕获全部流量。
+3. 点击“开始捕获”，访问网络或执行待分析的测试业务。
+4. 在“显示”输入框填写筛选条件并按回车，只筛选已经捕获的数据包。
+5. 单击列表中的任意一行，查看协议摘要和十六进制内容。
+6. 使用“保存 PCAP”或“导出统计”保存分析结果。
+
+> 如果列表没有实际流量，请先确认没有选中 `WAN Miniport`、`Loopback` 等虚拟或无流量网卡。
+
+## 两种过滤器
+
+| 对比项 | 抓包过滤（BPF） | 显示过滤 |
 | --- | --- | --- |
-| 作用对象 | **抓什么** | **看什么** |
-| 工作机制 | Npcap 内核层过滤 | 内存中筛选列表 |
-| 生效时机 | 点「开始捕获」/「应用过滤」 | 按**回车**立即生效 |
-| 被筛掉的包 | 根本不会被抓下来 | 已抓下来，只是不显示 |
-| 能否恢复 | 不能，需重新抓包 | 随时清空即可恢复 |
+| 输入位置 | 顶部“过滤” | 顶部“显示” |
+| 作用 | 决定哪些包会被捕获 | 决定哪些已捕获的包会被显示 |
+| 生效方式 | 点击“开始捕获”或“应用过滤” | 按回车立即生效 |
+| 被筛掉的包 | 不会进入程序 | 已经存在于内存列表中 |
+| 能否恢复 | 修改表达式后重新开始捕获 | 清空表达式后立即恢复显示 |
 
 典型组合：
 
 ```text
-过滤框：tcp port 443     ← 只抓 HTTPS，减少噪音
-显示框：baidu            ← 抓完只显示带 baidu 的包
+抓包过滤：tcp port 443
+显示过滤：baidu
 ```
 
-### 抓包过滤表达式（BPF）
-
-使用 libpcap 标准语法，语法错误时程序会弹出「过滤器语法错误」提示框，抓包不会启动。
-
-**基本结构**：`[协议] [方向] [类型] 值`
-
-| 组成 | 可选值 | 说明 |
-| --- | --- | --- |
-| 协议 | `ip` `ip6` `arp` `tcp` `udp` `icmp` `igmp` `ether` | 可省略，省略表示任意协议 |
-| 方向 | `src` `dst` `src or dst` `src and dst` | 可省略，默认 `src or dst` |
-| 类型 | `host` `net` `port` `portrange` | 指定要匹配的对象 |
-| 值 | IP 地址、域名、网段、端口号 | 端口只能写数字 |
-
-**逻辑运算**：
-
-| 运算 | 写法 |
-| --- | --- |
-| 与 | `and` 或 `&&` |
-| 或 | `or` 或 `||` |
-| 非 | `not` 或 `!` |
-| 分组 | `( )` |
-
-**常用示例**：
-
-| 目的 | 表达式 |
-| --- | --- |
-| 仅 TCP | `tcp` |
-| 仅 UDP | `udp` |
-| 仅 ARP | `arp` |
-| 指定主机（双向） | `host 192.168.1.10` |
-| 指定域名（双向） | `host www.baidu.com` |
-| 仅从某主机发出 | `src host 192.168.0.16` |
-| 指定端口（任意协议） | `port 53` |
-| 指定 TCP 端口 | `tcp port 80` |
-| 端口范围 | `tcp portrange 8000-9000` |
-| 整个网段 | `net 192.168.0.0/24` |
-| DNS 流量 | `udp port 53 or tcp port 53` |
-| HTTPS 流量 | `tcp port 443` |
-| 排除某主机 | `not host 192.168.1.10` |
-| 组合 | `tcp port 443 and host 183.2.172.177` |
-
-**注意**：
-
-- 域名在**编译时**解析成 IP，写 `host www.baidu.com` 后若 DNS 记录变化，需要重新开始捕获才会使用新地址
-- 抓包过滤无法修改已抓到的数据，改表达式后必须重新开始捕获
-
-### 显示过滤表达式（完整语法）
-
-只作用于**已经抓到的包**，不产生新流量，不改动抓包结果。
-
-**基本语法**：`字段==值`，或者直接写一个词作为关键字。多个条件用空格分隔，表示 **AND**（全部满足才显示）。
-
-| 字段 | 等价写法 | 匹配对象 | 示例 |
-| --- | --- | --- | --- |
-| `ip.src` | `src` | 源地址 | `ip.src==192.168.0.16` |
-| `ip.dst` | `dst` | 目的地址 | `ip.dst==183.2.172.177` |
-| `ip.addr` | `addr`、`ip` | 源或目的任一命中 | `ip.addr==183.2.172.177` |
-| `proto` | `protocol` | 协议列 | `proto==TLS` |
-| （无字段） | — | 关键字，在源地址/目的地址/协议/信息四列中同时搜索 | `baidu` |
-
-**匹配规则**：
-
-- 全部为**子串包含**匹配，不是完全相等 —— `ip.src==192.168` 能命中 `192.168.0.16`
-- 不区分大小写，`proto==tls` 与 `proto==TLS` 等价
-- 关键字 `443` 会同时命中信息列里的端口号
-
-**示例**：
-
-| 需求 | 写法 |
-| --- | --- |
-| 只看本机发出的流量 | `ip.src==192.168.0.16` |
-| 只看发往某台的流量 | `ip.dst==183.2.172.177` |
-| 某 IP 的双向流量 | `ip.addr==183.2.172.177` |
-| 只看 TLS | `proto==TLS` |
-| 只看 DNS | `proto==DNS` |
-| TLS 且来自本机 | `proto==TLS ip.src==192.168.0.16` |
-| 搜域名 | `baidu` |
-| 搜端口 | `443` |
-| 清空（恢复全显示） | 输入框留空后回车，或直接按 **ESC** |
-
-**当前不支持的语法**（写了不会报错，但会被当成普通关键字）：
-
-| 不支持的写法 | 替代做法 |
-| --- | --- |
-| `!=`（不等于） | 暂无，改用其他条件组合 |
-| `or` / `\|\|`（或） | 暂无，一次只能表达 AND |
-| 括号分组 | 暂无 |
-| `port==443` | 用关键字 `443`（匹配信息列） |
-| 通配符 `*` | 子串匹配已覆盖大部分场景 |
-| `>` `<` 比较运算 | 暂无 |
-
-> 提示：因为地址匹配是子串包含，`ip.dst==43` 会命中所有含 "43" 的地址，写地址时尽量写完整。
-
-### 查看访问了哪些网站（TLS SNI）
-
-HTTPS 虽然加密，但 TLS 握手中的 **ClientHello 会明文携带 SNI（服务器名）**，本工具已解析出来：
+### BPF 抓包过滤示例
 
 ```text
-192.168.0.16 -> 183.2.172.177 | 46697 -> 443 | ClientHello SNI=www.baidu.com TLS1.3
-183.2.172.177 -> 192.168.0.16 | 443 -> 46697 | ServerHello TLS1.2
+ip
+tcp
+udp
+arp
+tcp port 80
+udp port 53
+host 192.168.1.10
+net 192.168.1.0/24
+tcp portrange 8000-9000
+not host 192.168.1.10
+tcp port 443 and host 183.2.172.177
 ```
 
-操作建议：
+常用协议快捷按钮会直接填入 BPF 表达式：
 
-1. 先点「开始捕获」让抓包保持运行
-2. 再在浏览器中访问目标网站
-3. 在「显示」框输入域名关键字（如 `baidu`）回车
+| 按钮 | 表达式 |
+| --- | --- |
+| TCP | `tcp` |
+| UDP | `udp` |
+| HTTP | `tcp port 80 or tcp port 8080 or tcp port 8000 or tcp port 8888` |
+| ARP | `arp` |
+| DNS | `udp port 53 or tcp port 53` |
+| TLS | `tcp port 443 or tcp port 8443` |
 
-注意 SNI 只出现在连接的**第一个包**里，若该包已被 5000 行上限淘汰，就只能等下一次访问。
+域名会在应用 BPF 时解析为 IP。如果域名的 DNS 记录发生变化，需要重新开始捕获才能使用新地址。
 
-### 其他操作
+### 显示过滤语法
 
-- **协议快捷按钮**：TCP / UDP / HTTP / ARP / DNS / TLS，点击后自动填入对应 BPF 表达式；若正在抓包会自动重启捕获
-- **混杂模式**：默认开启；在 Wi-Fi 网卡上效果有限，切换后立即作用于当前捕获
-- **保存/打开 PCAP**：导出为标准 pcap 格式，可用 Wireshark 等工具进一步分析
-- **ESC**：在「显示」框中按 ESC 清空过滤条件
+显示过滤仅作用于已经捕获的数据。多个条件使用空格分隔，表示逻辑 AND。
+
+| 写法 | 匹配对象 | 示例 |
+| --- | --- | --- |
+| `ip.src==值` | 源地址 | `ip.src==192.168.1.10` |
+| `ip.dst==值` | 目的地址 | `ip.dst==8.8.8.8` |
+| `ip.addr==值` | 源地址或目的地址 | `ip.addr==8.8.8.8` |
+| `proto==值` | 协议列 | `proto==TLS` |
+| 裸关键字 | 地址、协议和信息列 | `baidu` |
+
+所有匹配均不区分大小写，并采用子串包含规则。例如 `ip.src==192.168` 可以匹配 `192.168.1.10`。
+
+```text
+proto==TLS ip.src==192.168.1.10
+```
+
+当前显示过滤不支持 `or`、`!=`、括号和数值比较；端口号可以作为普通关键字搜索。
+
+## TLS SNI 说明
+
+HTTPS 内容经过 TLS 加密，但连接建立时的 ClientHello 通常会明文携带 SNI 服务器名。程序可以显示类似信息：
+
+```text
+192.168.1.10 -> 183.2.172.177 | 46697 -> 443 | ClientHello SNI=www.baidu.com TLS1.3
+```
+
+SNI 通常只出现在连接的第一个包中。如果该包已被 5000 行滚动窗口淘汰，就无法再从当前列表中恢复。
+
+> 本工具不解析 TLS 加密内容，也无法直接查看 HTTPS 请求 URL、Cookie 或表单数据。
 
 ## 项目结构
 
 ```text
-.
-├── .gitattributes
-├── .gitignore
-├── CMakeLists.txt
-├── LICENSE
-├── README.md
+CppModernWinPcapSniffer/
+├── .gitattributes                 # Git 文本编码与换行规则
+├── .gitignore                     # 构建产物和编辑器文件忽略规则
+├── CMakeLists.txt                 # CMake 构建配置
+├── LICENSE                        # MIT 许可证
+├── README.md                      # 项目说明
+├── build-msvc.bat                 # Visual Studio 2022 + Ninja 构建脚本
 ├── docs/
-│   └── screenshot.jpg
+│   └── images/
+│       └── screenshot.png         # 最新程序运行截图
 ├── resources/
-│   ├── app.ico
-│   └── app.rc
+│   ├── app.ico                    # 应用图标
+│   └── app.rc                     # Windows 资源与版本信息
 ├── scripts/
-│   └── build.bat
-├── src/
-│   └── CppModernWinPcapSniffer.cpp
-├── build-msvc.bat            # Visual Studio 2022 + Ninja 一键构建脚本
-└── build/                    # 本地构建输出，不提交
+│   └── build.bat                  # MinGW-w64 构建脚本
+└── src/
+    └── CppModernWinPcapSniffer.cpp
 ```
 
-- `src/`：程序源码（单文件，约 1400 行）
-- `resources/`：图标和 Windows 资源脚本
-- `scripts/`：MinGW 构建脚本
-- `build-msvc.bat`：调用 VS2022 自带 CMake/Ninja 构建，已带 `/utf-8` 与 `/EHsc` 选项
-- `docs/`：文档和界面截图
-- `build/`、`build-msvc/`：构建输出目录，不纳入版本控制
+`build/`、`build-msvc/` 和中间文件不会提交到仓库。可通过 GitHub Releases 单独发布编译好的 EXE。
+
+## 技术实现
+
+- 使用原生 Win32 控件和所有者绘制完成现代化界面
+- 抓包线程与 UI 线程分离，通过 Windows 消息传递捕获结果
+- 自行声明 Npcap 所需的最小函数接口，运行时动态链接 `wpcap.dll`
+- 数据包列表采用 `LVS_OWNERDATA` 虚拟列表，限制内存中的历史记录数量
+- 使用 Per-Monitor V2 DPI Awareness，并按当前 DPI 重新布局控件
+- 优先启用 DwmSetWindowAttribute 的 Mica/亚克力效果，不支持时回退到普通背景
+- 同时维护协议计数和端点计数，可导出为 CSV 进行二次分析
 
 ## 协议支持
 
-| 协议 | 解析内容 |
+| 协议 | 已解析内容 |
 | --- | --- |
 | Ethernet | 源/目的 MAC、EtherType |
 | ARP | 操作码、发送方/目标 MAC 与 IP |
@@ -302,59 +266,44 @@ HTTPS 虽然加密，但 TLS 握手中的 **ClientHello 会明文携带 SNI（�
 | IGMP | 类型、最大响应时间、组地址 |
 | HTTP | 请求方法、Host、响应状态 |
 | DNS | 查询名、查询类型、响应码 |
-| TLS | 记录类型、版本、握手类型、**SNI 服务器名**（ClientHello 明文提取，无需解密） |
+| TLS | 记录类型、版本、握手类型、SNI |
 | DHCP | 消息类型、客户端 MAC |
 
 ## 已知限制
 
-**抓包与解析**
-
-- 不进行 TCP 流重组，一个 HTTP 响应被拆成多个包时会显示为多行，HTTP 只做明文摘要识别。
-- TLS 只解析记录层与握手（含 SNI），**不解析加密内容**，看不到 URL 路径、Cookie、表单等。
-- SNI 只出现在连接的第一个包（ClientHello）中，若该包已被淘汰则无法再看到域名。
-- 无线网卡能捕获的流量取决于驱动、信道和当前连接状态；混杂模式在 Wi-Fi 上效果有限。
-- 列表最多保留最近 5000 个数据包，超出后自动淘汰最旧的包，**显示过滤搜不到已淘汰的包**。
-
-**显示过滤**
-
-- 只支持 AND 组合，不支持 `or`、`!=`、括号、比较运算。
-- 端口不是独立字段，只能用关键字在信息列中模糊匹配。
-- 所有匹配均为子串包含，写地址时建议写完整。
+- 不进行 TCP 流重组，被拆分到多个数据包的 HTTP 报文会显示为多行。
+- TLS 仅解析记录层、握手和 SNI，不解析加密应用数据。
+- 列表最多保留最近 5000 个数据包，被淘汰的数据包无法再次查看。
+- 无线网卡可捕获的流量受驱动、信道、连接状态和系统策略影响，Wi-Fi 上的混杂模式效果有限。
+- 显示过滤只支持 AND 组合和子串匹配。
+- 当前仅支持打开经典 PCAP 文件，打开 `.pcapng` 时会提示暂不支持。
 
 ## 常见问题
 
-**Q：点了开始捕获，一个包都没有？**
+### 开始捕获后没有数据包
 
-网卡选错了。下拉框里 `WAN Miniport (Network Monitor)`、`WAN Miniport (IPv6/IP)` 等是虚拟伪网卡，上面没有实际流量。应选择 Wi-Fi 或有线网卡（如 `MediaTek Wi-Fi 6E`、`Realtek PCIe GbE`）。
+请选择实际存在流量的 Wi-Fi 或有线网卡。`WAN Miniport`、`Loopback` 等接口可能不会出现可用于分析的常规流量。
 
-**Q：输入显示过滤后列表空了？**
+### 输入显示过滤后列表为空
 
-说明当前这堆包里确实没有匹配项。显示过滤只在**已有数据**中筛选，不会去网上抓新包。请确认包还在列表里（最多保留 5000 行）。
+显示过滤只搜索已经捕获的数据。请确认匹配关键字，并确认目标数据包仍在最近 5000 个记录中。
 
-**Q：为什么搜不到刚访问的网站？**
+### 为什么看不到 HTTPS 请求内容
 
-SNI 只在连接的第一个包里出现，而列表只保留最近 5000 个包。正确做法是先点「开始捕获」，再访问网站，然后立刻过滤。
+被动抓包只能看到 TLS 密文。程序可显示 SNI、TLS 版本、握手类型和密文长度，但不能直接还原加密请求。
 
-**Q：为什么看不到 HTTPS 里的具体请求内容（URL、参数、密码）？**
+### 为什么编译时找不到 Npcap SDK
 
-TLS 是端到端加密，被动抓包只能看到密文。要看明文请求需要用中间人代理（如 Burp Suite）或配置 TLS 密钥日志后用 Wireshark 解密。本工具能提供的是 SNI、TLS 版本、握手类型和密文长度。
+本项目不需要 Npcap SDK。请确保运行环境中已安装 Npcap，并勾选 WinPcap API 兼容模式。
 
-**Q：点了一行，下面详情区还是空的？**
+## 安全与合规
 
-需要在列表里**单击选中**某一行才会填充详情，且要点击该行本身（不是窗口空白处）。
-
-**Q：显示过滤能用 `or` 吗？**
-
-暂不支持，多个条件之间固定为 AND（同时满足）。
-
-## 安全声明
-
-本工具仅用于课程实验、授权测试和自有网络排障。请勿在未授权的网络中抓取他人通信数据。使用本工具产生的一切后果由使用者自行承担。
+本工具仅用于课程实验、授权测试和自有网络排障。请勿在未授权的网络中抓取或分析他人通信数据。使用本工具产生的一切后果由使用者自行承担。
 
 ## 作者
 
-LianHaoruiSec mhszed
+**LianHaoruiSec mhszed**
 
 ## 许可证
 
-本项目采用 MIT License，详见 [LICENSE](LICENSE)。
+本项目采用 [MIT License](LICENSE)。
